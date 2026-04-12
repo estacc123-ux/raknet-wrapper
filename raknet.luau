@@ -359,13 +359,21 @@ local function ensureHook()
     hookRegistered = true
 end
 
--- hex / byte normalisation
+-- hex / byte / buffer normalisation
 
-local function normalizeBytes(value: string | PacketData): PacketData
+local function normalizeBytes(value: string | PacketData | buffer): PacketData
+    if type(value) == "buffer" then
+        local len   = buffer.len(value)
+        local bytes = table.create(len)
+        for i = 0, len - 1 do
+            bytes[i + 1] = buffer.readu8(value, i)
+        end
+        return bytes
+    end
     if type(value) == "table" then
         return copyBytes(value)
     end
-    assert(type(value) == "string", "expected string or byte table")
+    assert(type(value) == "string", "expected string, byte table, or buffer")
     if isHexString(value) then
         local compact = compactHex(value)
         local bytes   = table.create(#compact // 2)
@@ -386,7 +394,7 @@ local function sendBytes(
     priority:        number,
     reliability:     number,
     orderingChannel: number,
-    nativeValue:     (PacketData | string)?
+    nativeValue:     (PacketData | string | buffer)?
 ): (boolean, string?)
     local id = bytes[1] or 0
 
@@ -461,9 +469,11 @@ local raknet = nativeRakNet
 
 -- send helpers
 
-function raknet.sendraw(value: string | PacketData, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
-    local bytes       = normalizeBytes(value)
-    local nativeValue = (type(value) == "string" and not isHexString(value)) and value or copyBytes(bytes)
+function raknet.sendraw(value: string | PacketData | buffer, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
+    local bytes = normalizeBytes(value)
+    local nativeValue = (type(value) == "buffer") and value
+        or (type(value) == "string" and not isHexString(value)) and value
+        or copyBytes(bytes)
     return sendBytes(bytes, priority or 0, reliability or 0, orderingChannel or 0, nativeValue)
 end
 
@@ -481,6 +491,11 @@ function raknet.sendopcode(id: number, payload: PacketData?, priority: number?, 
     local bytes: PacketData = { id }
     for _, b in ipairs(payload or {}) do bytes[#bytes + 1] = b end
     return sendBytes(bytes, priority or 0, reliability or 0, orderingChannel or 0)
+end
+
+function raknet.sendbuffer(value: buffer, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
+    assert(type(value) == "buffer", "sendbuffer expects a buffer")
+    return sendBytes(normalizeBytes(value), priority or 0, reliability or 0, orderingChannel or 0, value)
 end
 
 function raknet.sendmany(packets: { { bytes: PacketData, priority: number?, reliability: number?, orderingChannel: number? } }): { { ok: boolean, err: string? } }
@@ -501,9 +516,9 @@ function raknet.clonepacket(packet): PacketSnapshot
     return clonePacketSnapshot(packet)
 end
 
-function raknet.matchprefix(bytes: PacketData | string, prefix: PacketData | string): boolean
-    local b = type(bytes)  == "string" and normalizeBytes(bytes)  or copyBytes(bytes)
-    local p = type(prefix) == "string" and normalizeBytes(prefix) or copyBytes(prefix)
+function raknet.matchprefix(bytes: PacketData | string | buffer, prefix: PacketData | string | buffer): boolean
+    local b = normalizeBytes(bytes)
+    local p = normalizeBytes(prefix)
     return matchesPrefix(b, p)
 end
 
@@ -517,7 +532,7 @@ function raknet.resend(packet, priority: number?, reliability: number?, ordering
     )
 end
 
-function raknet.sendlike(packet, newBytes: PacketData | string): (boolean, string?)
+function raknet.sendlike(packet, newBytes: PacketData | string | buffer): (boolean, string?)
     assert(type(packet) == "table", "sendlike expects a packet table")
     return raknet.sendraw(newBytes, packet.priority or 0, packet.reliability or 0, packet.orderingChannel or 0)
 end
@@ -629,10 +644,10 @@ function raknet.setrecentlimit(limit: number)
     end
 end
 
--- hex utilities
+-- hex / buffer utilities
 
-function raknet.tohex(bytes: PacketData | string, limit: number?): string
-    local normalized = type(bytes) == "string" and normalizeBytes(bytes) or copyBytes(bytes)
+function raknet.tohex(bytes: PacketData | string | buffer, limit: number?): string
+    local normalized = normalizeBytes(bytes)
     local maxCount   = limit or #normalized
     local count      = math.min(#normalized, maxCount)
     local out        = table.create(count)
@@ -657,6 +672,25 @@ function raknet.fromhex(value: string): PacketData
     return bytes
 end
 
+function raknet.tobuffer(bytes: PacketData | string): buffer
+    local normalized = normalizeBytes(bytes)
+    local buf        = buffer.create(#normalized)
+    for i = 1, #normalized do
+        buffer.writeu8(buf, i - 1, normalized[i])
+    end
+    return buf
+end
+
+function raknet.frombuffer(buf: buffer): PacketData
+    assert(type(buf) == "buffer", "frombuffer expects a buffer")
+    local len   = buffer.len(buf)
+    local bytes = table.create(len)
+    for i = 0, len - 1 do
+        bytes[i + 1] = buffer.readu8(buf, i)
+    end
+    return bytes
+end
+
 function raknet.packettostring(packet: PacketSnapshot): string
     local bytes   = copyBytes(packet.data or {})
     local id      = packet.id     or bytes[1] or 0
@@ -666,9 +700,9 @@ function raknet.packettostring(packet: PacketSnapshot): string
         id, #bytes, raknet.tohex(bytes, 48), source, blocked)
 end
 
-function raknet.hexdiff(left: PacketData | string, right: PacketData | string): string
-    local a      = type(left)  == "string" and normalizeBytes(left)  or copyBytes(left)
-    local b      = type(right) == "string" and normalizeBytes(right) or copyBytes(right)
+function raknet.hexdiff(left: PacketData | string | buffer, right: PacketData | string | buffer): string
+    local a      = normalizeBytes(left)
+    local b      = normalizeBytes(right)
     local maxLen = math.max(#a, #b)
     local lines  = table.create(maxLen)
     for i = 1, maxLen do
@@ -789,6 +823,7 @@ function raknet.stats()
 end
 
 -- teardown
+
 function raknet.teardown()
     local hook = rawget(nativeRakNet, "__wrapperHook")
     if type(hook) == "function" then
@@ -809,7 +844,7 @@ function raknet.teardown()
     rawset(nativeRakNet, "__transportMode", nil)
 end
 
--- position / physics
+-- position / physics (useless but iadded it)
 
 local function packFloat32LE(f: number): { number }
     local b = table.create(4)
@@ -873,9 +908,7 @@ end
 
 --[[
     raknet.sendposition(x, y, z, opts?)
-
     Packs and sends a position packet.  All fields are optional; reasonable defaults are used for anything omitted.
-
     opts fields:
         opcode          number?   First payload byte.  Default: 0x01.
         rotX/Y/Z        number?   Euler angles in degrees.  Converted to a
@@ -886,7 +919,6 @@ end
         priority        number?   RakNet priority.       Default 0.
         reliability     number?   RakNet reliability.    Default 0.
         orderingChannel number?   RakNet ordering channel. Default 0.
-
     Wire layout (bytes):
         [0]       opcode         uint8
         [1-4]     x              float32 LE
@@ -945,9 +977,7 @@ end
 
 --[[
     raknet.sendphysics(x, y, z, opts?)
-
     Packs and sends a full rigid-body physics state packet: position, orientation quaternion, linear velocity, and angular velocity.
-
     opts fields:
         opcode              number?   First payload byte.  Default: 0x02.
         qw/qx/qy/qz         number?   Orientation quaternion.  If any of
@@ -961,7 +991,6 @@ end
         priority            number?   Default 0.
         reliability         number?   Default 0.
         orderingChannel     number?   Default 0.
-
     Wire layout (bytes):
         [0]       opcode         uint8
         [1-4]     x              float32 LE

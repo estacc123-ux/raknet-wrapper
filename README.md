@@ -6,6 +6,7 @@
 - `raknet.sendhex(...)`
 - `raknet.sendstring(...)`
 - `raknet.sendopcode(...)`
+- `raknet.sendmany(...)`
 - `raknet.resend(...)`
 - `raknet.sendlike(...)`
 - `raknet.startcapture()`
@@ -15,10 +16,18 @@
 - `raknet.blockopcode(...)`
 - `raknet.clearrecent()`
 - `raknet.recent(...)`
+- `raknet.setrecentlimit(...)`
 - `raknet.clonepacket(...)`
 - `raknet.matchprefix(...)`
+- `raknet.use(...)`
+- `raknet.clearmiddleware()`
+- `raknet.setmode(...)`
+- `raknet.getmode()`
+- `raknet.dryrun(...)`
+- `raknet.teardown()`
 - `raknet.Capture:Connect(...)`
 - `raknet.Capture:Once(...)`
+- `raknet.Capture:Promise(...)`
 - `raknet.Capture:ConnectOpcode(...)`
 - `raknet.Capture:ConnectPrefix(...)`
 - `raknet.Capture:ConnectMatch(...)`
@@ -27,8 +36,11 @@
 - `raknet.hexdiff(...)`
 - `raknet.packettostring(...)`
 - `raknet.countopcodes(...)`
+- `raknet.waitfor(...)`
+- `raknet.captureonce(...)`
 - `raknet.stats()`
 - `raknet.resetstats()`
+- `raknet.getlasterror()`
 
 ## API
 
@@ -37,38 +49,38 @@
 `raknet.sendraw(value, priority?, reliability?, orderingChannel?) -> (boolean, string?)`
 
 - `value`: `string | {number}`
-- `priority`: `number?`
-- `reliability`: `number?`
-- `orderingChannel`: `number?`
 - returns:
   - `true` if the packet was accepted
-  - `false, "blocked by filter"` if your local filter blocked it
-  - `false, <error>` if native send failed
+  - `false, "blocked by filter"` if the local filter blocked it
+  - `false, "blocked by middleware"` if a middleware dropped it
+  - `false, <error>` if the native send failed
 
 `raknet.sendhex(value, priority?, reliability?, orderingChannel?) -> (boolean, string?)`
 
-- `value`: `string`
-- same return values as `sendraw`
+- `value`: `string` - hex string, spaces optional (`"83 00 01"` or `"830001"`)
 
 `raknet.sendstring(value, priority?, reliability?, orderingChannel?) -> (boolean, string?)`
 
-- `value`: `string`
-- same return values as `sendraw`
+- `value`: `string` - sent as raw bytes
 
 `raknet.sendopcode(id, payload?, priority?, reliability?, orderingChannel?) -> (boolean, string?)`
 
 - `id`: `number`
-- `payload`: `{number}?`
-- same return values as `sendraw`
+- `payload`: `{number}?` - appended after the opcode byte
+
+`raknet.sendmany(packets) -> { { ok: boolean, err: string? } }`
+
+- `packets`: `{ { bytes: {number}, priority?: number, reliability?: number, orderingChannel?: number } }`
+- sends each packet in order and returns a result table per entry
 
 `raknet.resend(packet, priority?, reliability?, orderingChannel?) -> (boolean, string?)`
 
-- `packet`: `{ data: {number}, priority: number?, reliability: number?, orderingChannel: number? }`
-- resends packet data, using packet transport values unless you override them
+- `packet`: `{ data: {number}, priority?: number, reliability?: number, orderingChannel?: number }`
+- resends the packet data, using its stored transport values unless overridden
 
 `raknet.sendlike(packet, newBytes) -> (boolean, string?)`
 
-- `packet`: `{ priority: number?, reliability: number?, orderingChannel: number? }`
+- `packet`: `{ priority?: number, reliability?: number, orderingChannel?: number }`
 - `newBytes`: `{number} | string`
 - sends replacement bytes with the same transport values as the source packet
 
@@ -86,7 +98,11 @@
 
 `raknet.Capture:Once(fn) -> { Disconnect: (self) -> () }`
 
-- same callback type as `Connect`
+`raknet.Capture:Promise(predicate?) -> { andThen, catch, cancel }`
+
+- `predicate`: `((packet) -> boolean)?` - optional filter, resolves on any packet if omitted
+- resolves with the first matching packet
+- `cancel()` disconnects without firing any callbacks
 
 `raknet.Capture:ConnectOpcode(id, fn) -> { Disconnect: (self) -> () }`
 
@@ -105,19 +121,19 @@
 
 `raknet.waitfor(id?, timeout?) -> packet?`
 
-- `id`: `number?`
-- `timeout`: `number?`
+- `id`: `number?` - opcode to wait for, or any packet if nil
+- `timeout`: `number?` - seconds, default 5
+- yields the coroutine until a match arrives or the deadline expires
 
 `raknet.captureonce(id?, timeout?) -> packet?`
 
-- `id`: `number?`
-- `timeout`: `number?`
+- same as `waitfor` but temporarily enables capture if it wasn't already on
 
 ### Filter helpers
 
 `raknet.setfilter(bytes?) -> ()`
 
-- `bytes`: `{number}?`
+- `bytes`: `{number}?` - prefix to block; passing nil or `{}` clears the filter
 
 `raknet.clearfilter() -> ()`
 
@@ -127,30 +143,57 @@
 
 - `id`: `number`
 
-### Replay/history helpers
+### Middleware
+
+`raknet.use(fn) -> { Remove: (self) -> () }`
+
+- `fn`: `(packet: PacketSnapshot) -> PacketSnapshot?`
+- runs on every outgoing packet before it is sent
+- return a (possibly modified) copy to continue, or `nil` to drop the packet
+- middlewares run in insertion order
+- returns a handle with `:Remove()` to unregister
+
+`raknet.clearmiddleware() -> ()`
+
+### Replay / history helpers
 
 `raknet.clearrecent() -> ()`
 
 `raknet.recent(limit?, source?) -> {packet}`
 
 - `limit`: `number?`
-- `source`: `string?`
+- `source`: `string?` - `"hook"`, `"manual"`, `"manual-dryrun"`, etc.
+- returns packets newest-first
+
+`raknet.setrecentlimit(limit) -> ()`
+
+- `limit`: `number` - max entries to keep in the ring buffer, default 200
 
 `raknet.clonepacket(packet) -> packet`
-
-- `packet`: `table`
 
 `raknet.matchprefix(bytes, prefix) -> boolean`
 
 - `bytes`: `{number} | string`
 - `prefix`: `{number} | string`
 
+### Transport mode
+
+`raknet.setmode(mode) -> ()`
+
+- `mode`: `"live" | "dryrun"`
+
+`raknet.getmode() -> string`
+
+`raknet.dryrun(enabled?) -> ()`
+
+- `enabled`: `boolean?` - pass `false` to switch back to live
+
 ### Formatting helpers
 
 `raknet.tohex(bytes, limit?) -> string`
 
 - `bytes`: `{number} | string`
-- `limit`: `number?`
+- `limit`: `number?` - truncates with `...` if the payload exceeds this
 
 `raknet.fromhex(value) -> {number}`
 
@@ -172,7 +215,7 @@
 
 `raknet.stats() -> table`
 
-Returns a table containing:
+Returns a snapshot containing:
 
 - `sent: number`
 - `blocked: number`
@@ -192,8 +235,16 @@ Returns a table containing:
 
 `raknet.countopcodes(seconds?, source?) -> { [number]: number }`
 
-- `seconds`: `number?`
+- `seconds`: `number?` - capture window, default 3
 - `source`: `string?`
+
+### Teardown
+
+`raknet.teardown() -> ()`
+
+Fully unregisters the hook, clears all subscribers, pending sends, middleware,
+filter, ring buffer, and stats. Safe to call multiple times. After this the
+wrapper can be re-executed from a clean slate.
 
 ## Basic examples
 
@@ -213,6 +264,20 @@ Send a packet by opcode:
 
 ```luau
 raknet.sendopcode(0x83, { 0x00, 0x01 })
+```
+
+Send multiple packets at once:
+
+```luau
+local results = raknet.sendmany({
+    { bytes = { 0x83, 0x00, 0x01 } },
+    { bytes = { 0x84, 0xFF }, priority = 1 },
+})
+for i, r in ipairs(results) do
+    if not r.ok then
+        print("packet", i, "failed:", r.err)
+    end
+end
 ```
 
 Re-send a captured packet:
@@ -235,7 +300,7 @@ end
 
 ## Capture
 
-Start capture and listen for packets:
+Start capture and listen for all packets:
 
 ```luau
 raknet.startcapture()
@@ -245,19 +310,29 @@ local conn = raknet.Capture:Connect(function(packet)
 end)
 ```
 
-Listen for a single opcode:
+Listen for a specific opcode:
 
 ```luau
 local conn = raknet.Capture:ConnectOpcode(0x83, function(packet)
-    print("data packet:", raknet.tohex(packet.data))
+    print("got 0x83:", raknet.tohex(packet.data))
 end)
 ```
 
-One time listener:
+One-shot listener:
 
 ```luau
 raknet.Capture:Once(function(packet)
     print("first packet:", packet.id)
+end)
+```
+
+Promise-style (useful inside coroutines):
+
+```luau
+raknet.Capture:Promise(function(packet)
+    return packet.id == 0x83
+end):andThen(function(packet)
+    print("resolved:", raknet.packettostring(packet))
 end)
 ```
 
@@ -275,7 +350,7 @@ Match with a custom predicate:
 local conn = raknet.Capture:ConnectMatch(function(packet)
     return packet.id == 0x83 and packet.data[2] == 0x07
 end, function(packet)
-    print("custom match:", raknet.packettostring(packet))
+    print("match:", raknet.packettostring(packet))
 end)
 ```
 
@@ -306,13 +381,71 @@ Clear filter:
 raknet.clearfilter()
 ```
 
-important: filtering is prefix based.  
+important: filtering is prefix-based.  
 `{ 0x83 }` blocks any packet starting with `0x83`.  
 `{ 0x83, 0x00 }` only blocks packets whose first two bytes are `83 00`.
 
+## Middleware
+
+Log and optionally mutate every outgoing packet:
+
+```luau
+local handle = raknet.use(function(packet)
+    print("outgoing:", raknet.packettostring(packet))
+    return packet -- pass through unchanged
+end)
+```
+
+Drop a packet by returning nil:
+
+```luau
+raknet.use(function(packet)
+    if packet.id == 0x83 then
+        return nil -- silently dropped
+    end
+    return packet
+end)
+```
+
+Mutate the payload before send:
+
+```luau
+raknet.use(function(packet)
+    local p = raknet.clonepacket(packet)
+    p.data[2] = 0xFF
+    p.size    = #p.data
+    return p
+end)
+```
+
+Unregister a specific middleware:
+
+```luau
+handle:Remove()
+```
+
+Clear all middleware:
+
+```luau
+raknet.clearmiddleware()
+```
+
+## Dry run mode
+
+Test send logic without actually transmitting:
+
+```luau
+raknet.dryrun(true)
+
+raknet.sendopcode(0x83, { 0x00, 0x01 }) -- no packet leaves the client
+print(raknet.stats().dryrunSends)        -- 1
+
+raknet.dryrun(false) -- back to live
+```
+
 ## Return values
 
-Most send helpers return:
+Most send helpers return two values:
 
 ```luau
 local ok, err = raknet.sendopcode(0x83, { 0x00, 0x01 })
@@ -320,9 +453,10 @@ local ok, err = raknet.sendopcode(0x83, { 0x00, 0x01 })
 
 Possible outcomes:
 
-- `true` when the packet was accepted by the wrapper
-- `false, "blocked by filter"` when the local filter blocked it
-- `false, <executor error>` when native live send failed
+- `true` - packet accepted by the wrapper
+- `false, "blocked by filter"` - the local filter matched
+- `false, "blocked by middleware"` - a middleware returned nil
+- `false, <executor error>` - native live send failed
 
 ## Formatting helpers
 
@@ -343,15 +477,18 @@ Hex diff:
 
 ```luau
 print(raknet.hexdiff({ 0x83, 0x00, 0x01 }, { 0x83, 0x07, 0x01 }))
+-- 01: 83
+-- 02: 00 -> 07
+-- 03: 01
 ```
 
 Packet summary:
 
 ```luau
 print(raknet.packettostring({
-    id = 0x83,
-    data = { 0x83, 0x00, 0x01 },
-    source = "manual",
+    id      = 0x83,
+    data    = { 0x83, 0x00, 0x01 },
+    source  = "manual",
     blocked = false,
 }))
 ```
@@ -365,25 +502,36 @@ local s = raknet.stats()
 print(s.sent, s.captured, s.blocked)
 ```
 
+Per-opcode breakdown:
+
+```luau
+local s = raknet.stats()
+for id, bucket in pairs(s.byOpcode) do
+    print(string.format("0x%02X  sent=%d blocked=%d captured=%d", id, bucket.sent, bucket.blocked, bucket.captured))
+end
+```
+
 Reset counters:
 
 ```luau
 raknet.resetstats()
 ```
 
-Count opcodes for a short capture window:
+Count opcodes over a capture window:
 
 ```luau
-local counts = raknet.countopcodes(3, "manual")
-print(counts[0x83], counts[0x84])
+local counts = raknet.countopcodes(3, "hook")
+for id, n in pairs(counts) do
+    print(string.format("0x%02X x%d", id, n))
+end
 ```
 
 Read recent captured packets:
 
 ```luau
-local packets = raknet.recent(10, "manual")
-for i = 1, #packets do
-    print(raknet.packettostring(packets[i]))
+local packets = raknet.recent(10, "hook")
+for _, p in ipairs(packets) do
+    print(raknet.packettostring(p))
 end
 ```
 
@@ -391,6 +539,13 @@ Last native send error:
 
 ```luau
 print(raknet.getlasterror())
+```
+
+## Teardown
+
+```luau
+raknet.teardown()
+-- wrapper is fully reset; safe to re-execute the script
 ```
 
 ## Note

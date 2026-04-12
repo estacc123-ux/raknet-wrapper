@@ -1,5 +1,17 @@
 # raknet wrapper
+**fixes**
+- `pendingManualSends` used string concatenation as a key which could collide on certain payloads, switched to exact byte comparison
+- `hookRegistered` was never reset between executions, added `teardown()` to handle that
+- `waitfor` was busy-polling with `task.wait()`, now uses a proper coroutine yield + signal wakeup
+- `table.remove(t, 1)` on every captured packet was O(n), replaced with a fixed-size ring buffer
+- `Disconnect` did a linear scan over the callback list, now O(1) via subscriber ID map
 
+**new**
+- `raknet.use(fn)`: middleware pipeline, return nil to drop a packet or a modified copy to transform it
+- `raknet.sendmany(packets)`: batch send with per-packet results
+- `raknet.Capture:Promise(predicate?)`: promise-style capture for use inside coroutines
+- `raknet.setrecentlimit(n)`: configure the ring buffer size at runtime
+- `raknet.teardown()`: full cleanup, safe to call multiple times
 ## added funcs:
 
 - `raknet.sendraw(...)`

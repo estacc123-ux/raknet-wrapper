@@ -809,6 +809,245 @@ function raknet.teardown()
     rawset(nativeRakNet, "__transportMode", nil)
 end
 
+-- position / physics
+
+local function packFloat32LE(f: number): { number }
+    local b = table.create(4)
+    local packed = string.pack("<f", f)
+    for i = 1, 4 do b[i] = string.byte(packed, i) end
+    return b
+end
+
+local function packUint8(n: number): number
+    return math.floor(n) % 256
+end
+
+local function packUint16LE(n: number): { number }
+    n = math.floor(n) % 65536
+    return { n % 256, math.floor(n / 256) }
+end
+
+local function packUint32LE(n: number): { number }
+    n = math.floor(n) % 4294967296
+    return {
+        n % 256,
+        math.floor(n / 256)   % 256,
+        math.floor(n / 65536) % 256,
+        math.floor(n / 16777216) % 256,
+    }
+end
+
+local function packInt16LE(n: number): { number }
+    n = math.floor(n)
+    if n < 0 then n = n + 65536 end
+    return { n % 256, math.floor(n / 256) % 256 }
+end
+
+local function appendBytes(dst: { number }, src: { number })
+    for i = 1, #src do dst[#dst + 1] = src[i] end
+end
+
+local function packQuat(qw: number, qx: number, qy: number, qz: number): { number }
+    local out = table.create(16)
+    appendBytes(out, packFloat32LE(qw))
+    appendBytes(out, packFloat32LE(qx))
+    appendBytes(out, packFloat32LE(qy))
+    appendBytes(out, packFloat32LE(qz))
+    return out
+end
+-- Rotation order: Y (yaw) → X (pitch) → Z (roll).
+local function eulerToQuat(rx: number, ry: number, rz: number): (number, number, number, number)
+    local toRad = math.pi / 180
+    local cx = math.cos(rx * toRad * 0.5)
+    local sx = math.sin(rx * toRad * 0.5)
+    local cy = math.cos(ry * toRad * 0.5)
+    local sy = math.sin(ry * toRad * 0.5)
+    local cz = math.cos(rz * toRad * 0.5)
+    local sz = math.sin(rz * toRad * 0.5)
+    return
+        cx*cy*cz + sx*sy*sz, -- w
+        sx*cy*cz - cx*sy*sz, -- x
+        cx*sy*cz + sx*cy*sz, -- y
+        cx*cy*sz - sx*sy*cz  -- z
+end
+
+--[[
+    raknet.sendposition(x, y, z, opts?)
+
+    Packs and sends a position packet.  All fields are optional; reasonable defaults are used for anything omitted.
+
+    opts fields:
+        opcode          number?   First payload byte.  Default: 0x01.
+        rotX/Y/Z        number?   Euler angles in degrees.  Converted to a
+                                  quaternion and written as 4×float32 LE.
+                                  Omit all three to send identity rotation.
+        velX/Y/Z        number?   Linear velocity, float32 LE each.  Default 0.
+        extraBytes      {number}? Raw bytes appended after velocity.
+        priority        number?   RakNet priority.       Default 0.
+        reliability     number?   RakNet reliability.    Default 0.
+        orderingChannel number?   RakNet ordering channel. Default 0.
+
+    Wire layout (bytes):
+        [0]       opcode         uint8
+        [1-4]     x              float32 LE
+        [5-8]     y              float32 LE
+        [9-12]    z              float32 LE
+        [13-16]   qw             float32 LE
+        [17-20]   qx             float32 LE
+        [21-24]   qy             float32 LE
+        [25-28]   qz             float32 LE
+        [29-32]   velX           float32 LE
+        [33-36]   velY           float32 LE
+        [37-40]   velZ           float32 LE
+        [41+]     extraBytes     (optional)
+]]
+function raknet.sendposition(
+    x: number,
+    y: number,
+    z: number,
+    opts: {
+        opcode:          number?,
+        rotX:            number?,
+        rotY:            number?,
+        rotZ:            number?,
+        velX:            number?,
+        velY:            number?,
+        velZ:            number?,
+        extraBytes:      { number }?,
+        priority:        number?,
+        reliability:     number?,
+        orderingChannel: number?,
+    }?
+): (boolean, string?)
+    opts = opts or {}
+
+    local qw, qx, qy, qz
+    if opts.rotX or opts.rotY or opts.rotZ then
+        qw, qx, qy, qz = eulerToQuat(opts.rotX or 0, opts.rotY or 0, opts.rotZ or 0)
+    else
+        qw, qx, qy, qz = 1, 0, 0, 0  -- identity
+    end
+
+    local bytes: { number } = { packUint8(opts.opcode or 0x01) }
+    appendBytes(bytes, packFloat32LE(x))
+    appendBytes(bytes, packFloat32LE(y))
+    appendBytes(bytes, packFloat32LE(z))
+    appendBytes(bytes, packQuat(qw, qx, qy, qz))
+    appendBytes(bytes, packFloat32LE(opts.velX or 0))
+    appendBytes(bytes, packFloat32LE(opts.velY or 0))
+    appendBytes(bytes, packFloat32LE(opts.velZ or 0))
+    if opts.extraBytes then
+        appendBytes(bytes, opts.extraBytes)
+    end
+
+    return sendBytes(bytes, opts.priority or 0, opts.reliability or 0, opts.orderingChannel or 0)
+end
+
+--[[
+    raknet.sendphysics(x, y, z, opts?)
+
+    Packs and sends a full rigid-body physics state packet: position, orientation quaternion, linear velocity, and angular velocity.
+
+    opts fields:
+        opcode              number?   First payload byte.  Default: 0x02.
+        qw/qx/qy/qz         number?   Orientation quaternion.  If any of
+                                      rotX/Y/Z are provided instead, they
+                                      are converted automatically.
+        rotX/Y/Z            number?   Euler angles (degrees).  Ignored when
+                                      qw/qx/qy/qz are all supplied.
+        velX/Y/Z            number?   Linear velocity.     Default 0.
+        angVelX/Y/Z         number?   Angular velocity.    Default 0.
+        extraBytes          {number}? Raw bytes appended at the end.
+        priority            number?   Default 0.
+        reliability         number?   Default 0.
+        orderingChannel     number?   Default 0.
+
+    Wire layout (bytes):
+        [0]       opcode         uint8
+        [1-4]     x              float32 LE
+        [5-8]     y              float32 LE
+        [9-12]    z              float32 LE
+        [13-16]   qw             float32 LE
+        [17-20]   qx             float32 LE
+        [21-24]   qy             float32 LE
+        [25-28]   qz             float32 LE
+        [29-32]   velX           float32 LE
+        [33-36]   velY           float32 LE
+        [37-40]   velZ           float32 LE
+        [41-44]   angVelX        float32 LE
+        [45-48]   angVelY        float32 LE
+        [49-52]   angVelZ        float32 LE
+        [53+]     extraBytes     (optional)
+]]
+function raknet.sendphysics(
+    x: number,
+    y: number,
+    z: number,
+    opts: {
+        opcode:          number?,
+        qw:              number?,
+        qx:              number?,
+        qy:              number?,
+        qz:              number?,
+        rotX:            number?,
+        rotY:            number?,
+        rotZ:            number?,
+        velX:            number?,
+        velY:            number?,
+        velZ:            number?,
+        angVelX:         number?,
+        angVelY:         number?,
+        angVelZ:         number?,
+        extraBytes:      { number }?,
+        priority:        number?,
+        reliability:     number?,
+        orderingChannel: number?,
+    }?
+): (boolean, string?)
+    opts = opts or {}
+
+    local qw, qx, qy, qz
+    if opts.qw ~= nil or opts.qx ~= nil or opts.qy ~= nil or opts.qz ~= nil then
+        qw = opts.qw or 1
+        qx = opts.qx or 0
+        qy = opts.qy or 0
+        qz = opts.qz or 0
+    elseif opts.rotX or opts.rotY or opts.rotZ then
+        qw, qx, qy, qz = eulerToQuat(opts.rotX or 0, opts.rotY or 0, opts.rotZ or 0)
+    else
+        qw, qx, qy, qz = 1, 0, 0, 0
+    end
+
+    local bytes: { number } = { packUint8(opts.opcode or 0x02) }
+    appendBytes(bytes, packFloat32LE(x))
+    appendBytes(bytes, packFloat32LE(y))
+    appendBytes(bytes, packFloat32LE(z))
+    appendBytes(bytes, packQuat(qw, qx, qy, qz))
+    appendBytes(bytes, packFloat32LE(opts.velX    or 0))
+    appendBytes(bytes, packFloat32LE(opts.velY    or 0))
+    appendBytes(bytes, packFloat32LE(opts.velZ    or 0))
+    appendBytes(bytes, packFloat32LE(opts.angVelX or 0))
+    appendBytes(bytes, packFloat32LE(opts.angVelY or 0))
+    appendBytes(bytes, packFloat32LE(opts.angVelZ or 0))
+    if opts.extraBytes then
+        appendBytes(bytes, opts.extraBytes)
+    end
+
+    return sendBytes(bytes, opts.priority or 0, opts.reliability or 0, opts.orderingChannel or 0)
+end
+
+-- also expose the pack utilities so callers can build custom layouts
+raknet.pack = {
+    float32LE = packFloat32LE,
+    uint8     = packUint8,
+    uint16LE  = packUint16LE,
+    uint32LE  = packUint32LE,
+    int16LE   = packInt16LE,
+    quat      = packQuat,
+    eulerToQuat = eulerToQuat,
+    append    = appendBytes,
+}
+
 -- exports
 
 raknet.Capture = setmetatable({}, Capture)

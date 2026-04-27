@@ -783,6 +783,18 @@ function raknet.countopcodes(seconds: number?, source: string?): { [number]: num
     return counts
 end
 
+function raknet.packetrate(seconds: number?, source: string?): number
+    local duration = math.max(0.05, seconds or 3)
+    local counts = raknet.countopcodes(duration, source)
+
+    local total = 0
+    for _, count in pairs(counts) do
+        total += count
+    end
+
+    return total / duration
+end
+
 -- stats
 
 function raknet.resetstats()
